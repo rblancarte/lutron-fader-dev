@@ -29,3 +29,6 @@ htmlcov/
 Thumbs.db
 
 # Submodules are managed separately
+
+# Protocol documentation (not redistributed)
+*.pdf

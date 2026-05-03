@@ -1,6 +1,79 @@
 # Lutron Fader Dev
 
-Development workspace for the Lutron Fader project. Contains tests, integration scripts, and examples. The integration and card live in their own repos and are included here as git submodules.
+Development workspace for the Lutron Fader project — a Home Assistant custom integration that unlocks the full capabilities of Lutron Caseta hubs via the **Lutron Integration Protocol**.
+
+## What This Project Does
+
+Home Assistant's built-in Lutron Caseta integration is limited to what the official cloud API exposes. The Lutron Integration Protocol — accessible over a direct Telnet connection to the hub — provides far richer control: extended fade times, zone queries, real-time push events, and more features that the cloud API never surfaces.
+
+This project is a starting point for building a full-featured HA integration on top of the Lutron Integration Protocol. The first capability implemented is long fade times (minutes to hours), which is not possible through the standard integration. The architecture is designed to grow — each additional protocol feature can be added without restructuring the core connection layer.
+
+## How It Works
+
+```
+Home Assistant
+    └── LutronFaderLight (light.py)
+            └── LutronTelnetConnection (lutron_telnet.py)
+                    └── Telnet → Lutron Hub (port 23)
+                            └── Lutron Integration Protocol
+```
+
+When a fade command is issued, `LutronTelnetConnection` sends a command to the hub over Telnet and receives an acknowledgment. The hub reports the target level immediately rather than streaming intermediate values during the fade, so `LutronFaderLight` runs a client-side interpolation timer that pushes live brightness updates to HA every second for the duration of the fade.
+
+## The Lutron Integration Protocol
+
+The Lutron Integration Protocol is a line-based text protocol spoken over a Telnet connection to the hub (port 23). After logging in, you send commands and receive responses in real time.
+
+**Login sequence:**
+```
+login: lutron
+password: integration
+GNET>
+```
+
+**Command format:**
+```
+#OUTPUT,<zone_id>,<action>,<level>,<fade_time>
+```
+
+**Query format:**
+```
+?OUTPUT,<zone_id>,<action>
+```
+
+**Push response format:**
+```
+~OUTPUT,<zone_id>,<action>,<level>
+```
+
+Where `action 1` = zone level, `level` is 0–100 (percentage).
+
+**Key gotcha — fade time format:**  
+Raw integer fade times only work for values 0–59 (treated as seconds). For 60 seconds or longer, the hub silently ignores a raw integer and snaps immediately. Fade times must be formatted as `HH:MM:SS`:
+
+```
+# Works — snaps instantly despite the value:
+#OUTPUT,5,1,50,60
+
+# Works correctly — fades over 1 minute:
+#OUTPUT,5,1,50,00:01:00
+```
+
+**Sample session** (via `nc <hub_ip> 23`):
+```
+login: lutron
+password: integration
+GNET> ?OUTPUT,5,1
+~OUTPUT,5,1,41.18
+GNET> #OUTPUT,5,1,0,00:30:00
+~OUTPUT,5,1,0.00
+GNET>
+```
+
+The hub acknowledges a fade command immediately with the target level. The physical light then fades over the specified time.
+
+**Protocol specification:**  
+The full Lutron Integration Protocol specification (P/N 040249) is publicly hosted by Lutron: [Lutron Integration Protocol PDF](https://assets.lutron.com/a/documents/040249.pdf). If you want a local copy for reference, dropping it in this directory is safe — `*.pdf` is gitignored.
 
 ## Repo Structure
 
@@ -54,7 +127,7 @@ Scripts in `scripts/` require a real Lutron hub. Update the host IP in each scri
 | `debug_query.py` | Test query commands against the hub |
 | `test_lutron_telnet.py` | Full manual test suite with interactive mode |
 | `test_connection_longevity.py` | Test how long the hub keeps a connection alive |
-| `test_lip_queries.py` | Test various LIP protocol commands |
+| `test_lip_queries.py` | Test various Lutron Integration Protocol commands |
 
 ## Submodule Workflow
 
