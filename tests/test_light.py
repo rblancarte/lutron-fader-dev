@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lutron-fader'))
 
 from custom_components.lutron_fader.light import LutronFaderLight
 from custom_components.lutron_fader.lutron_telnet import SOURCE_INTERNAL, SOURCE_EXTERNAL
