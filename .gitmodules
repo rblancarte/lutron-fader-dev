@@ -1,0 +1,6 @@
+[submodule "lutron-fader"]
+	path = lutron-fader
+	url = https://github.com/rblancarte/lutron-fader
+[submodule "lutron-fader-card"]
+	path = lutron-fader-card
+	url = https://github.com/rblancarte/lutron-fader-card
