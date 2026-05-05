@@ -73,7 +73,7 @@ GNET>
 The hub acknowledges a fade command immediately with the target level. The physical light then fades over the specified time.
 
 **Caseta Pro supported OUTPUT actions:**  
-The ICD documents many OUTPUT action numbers, but Caseta Pro (L-BDGPRO2-WH) only supports four — confirmed through testing:
+The ICD documents many OUTPUT action numbers, but Caseta Pro (L-BDGPRO2-WH) only appears to support four — confirmed through testing:
 
 | Action | Command | Description |
 |--------|---------|-------------|
