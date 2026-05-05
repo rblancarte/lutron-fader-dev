@@ -1,6 +1,6 @@
 # Lutron Fader Dev
 
-Development workspace for the Lutron Fader project — a Home Assistant custom integration that unlocks the full capabilities of Lutron Caseta hubs via the **Lutron Integration Protocol**.
+Development workspace for the Lutron Fader project — a Home Assistant custom integration that unlocks hardware-native fade capabilities on Lutron systems via the **Lutron Integration Protocol (LIP)**.
 
 ## What This Project Does
 
