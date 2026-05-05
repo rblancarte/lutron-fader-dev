@@ -72,6 +72,18 @@ GNET>
 
 The hub acknowledges a fade command immediately with the target level. The physical light then fades over the specified time.
 
+**Caseta Pro supported OUTPUT actions:**  
+The ICD documents many OUTPUT action numbers, but Caseta Pro (L-BDGPRO2-WH) only supports four — confirmed through testing:
+
+| Action | Command | Description |
+|--------|---------|-------------|
+| 1 | `#OUTPUT,<id>,1,<level>,<fade>` | Set level (with optional fade time) |
+| 2 | `#OUTPUT,<id>,2` | Start Raising |
+| 3 | `#OUTPUT,<id>,3` | Start Lowering |
+| 4 | `#OUTPUT,<id>,4` | Stop |
+
+Action 1 is the one this integration uses. The fade time argument is what makes it useful — see the `HH:MM:SS` format note above.
+
 **Protocol specification:**  
 The full Lutron Integration Protocol specification (P/N 040249) is publicly hosted by Lutron: [Lutron Integration Protocol PDF](https://assets.lutron.com/a/documents/040249.pdf). If you want a local copy for reference, dropping it in this directory is safe — `*.pdf` is gitignored.
 
