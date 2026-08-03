@@ -318,7 +318,7 @@ class TestBoundarySnapping:
         light = make_light()
         light._connection.set_light_level = AsyncMock(return_value=True)
 
-        with patch("asyncio.get_event_loop") as mock_loop, \
+        with patch("custom_components.lutron_fader.light.asyncio.get_running_loop") as mock_loop, \
              patch("custom_components.lutron_fader.light.async_track_time_interval"):
             mock_call_later = MagicMock()
             mock_loop.return_value.call_later = mock_call_later
@@ -348,7 +348,7 @@ class TestBoundarySnapping:
         light._attr_is_on = True
         light._connection.set_light_level = AsyncMock(return_value=True)
 
-        with patch("asyncio.get_event_loop") as mock_loop, \
+        with patch("custom_components.lutron_fader.light.asyncio.get_running_loop") as mock_loop, \
              patch("custom_components.lutron_fader.light.async_track_time_interval"):
             mock_call_later = MagicMock()
             mock_loop.return_value.call_later = mock_call_later
