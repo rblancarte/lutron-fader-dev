@@ -351,17 +351,17 @@ class TestSendCommand:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_exception_triggers_disconnect(self):
+    async def test_exception_triggers_connection_lost(self):
         conn = make_connection()
         conn._connected = True
         conn._writer = make_writer()
         conn._writer.drain = AsyncMock(side_effect=OSError("broken pipe"))
 
         with patch.object(conn, '_reset_ping_timer'), \
-             patch.object(conn, 'disconnect') as mock_disconnect:
+             patch.object(conn, '_handle_connection_lost') as mock_lost:
             result = await conn.send_command("#OUTPUT,25,1,50,0")
 
-        mock_disconnect.assert_called_once()
+        mock_lost.assert_called_once()
         assert result is None
 
 
@@ -398,7 +398,7 @@ class TestSetLightLevel:
         conn = make_connection()
         with patch.object(conn, 'send_command', return_value="~OUTPUT,25,1,50.00") as mock_send:
             await conn.set_light_level(zone_id=25, brightness=50, fade_time=1800)
-        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:30:00")
+        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:30:00", expected_zone=25)
 
     @pytest.mark.asyncio
     async def test_returns_true_on_valid_response(self):
@@ -426,21 +426,21 @@ class TestSetLightLevel:
         conn = make_connection()
         with patch.object(conn, 'send_command', return_value="~OUTPUT,25,1,50.00") as mock_send:
             await conn.set_light_level(25, 50)
-        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:00:00")
+        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:00:00", expected_zone=25)
 
     @pytest.mark.asyncio
     async def test_under_60s_uses_seconds_field(self):
         conn = make_connection()
         with patch.object(conn, 'send_command', return_value="~OUTPUT,25,1,50.00") as mock_send:
             await conn.set_light_level(25, 50, 10)
-        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:00:10")
+        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:00:10", expected_zone=25)
 
     @pytest.mark.asyncio
     async def test_60s_formats_as_minutes(self):
         conn = make_connection()
         with patch.object(conn, 'send_command', return_value="~OUTPUT,25,1,50.00") as mock_send:
             await conn.set_light_level(25, 50, 60)
-        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:01:00")
+        mock_send.assert_called_once_with("#OUTPUT,25,1,50,00:01:00", expected_zone=25)
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +453,7 @@ class TestQueryLightLevel:
         conn = make_connection()
         with patch.object(conn, 'send_command', return_value="~OUTPUT,25,1,75.00") as mock_send:
             await conn.query_light_level(25)
-        mock_send.assert_called_once_with("?OUTPUT,25,1")
+        mock_send.assert_called_once_with("?OUTPUT,25,1", expected_zone=25)
 
     @pytest.mark.asyncio
     async def test_parses_brightness(self):
@@ -482,3 +482,203 @@ class TestQueryLightLevel:
         with patch.object(conn, 'send_command', return_value="~OUTPUT,25,1"):
             result = await conn.query_light_level(25)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Connection loss / reconnect
+# ---------------------------------------------------------------------------
+
+class TestConnectionLoss:
+    @pytest.mark.asyncio
+    async def test_reader_reset_error_marks_lost_and_schedules_reconnect(self):
+        """A non-IncompleteRead socket error must not leave a zombie 'connected' state."""
+        conn = make_connection()
+        conn._connected = True
+        conn._auto_reconnect = True
+        conn._writer = make_writer()
+        conn._reader = AsyncMock()
+        conn._reader.readuntil = AsyncMock(side_effect=ConnectionResetError("reset by peer"))
+        availability = []
+        conn.add_availability_callback(availability.append)
+
+        with patch.object(conn, '_schedule_reconnect') as mock_reconnect:
+            await conn._reader_loop()
+
+        assert conn.is_connected is False
+        assert conn.available is False
+        assert conn._writer is None
+        assert availability == [False]
+        mock_reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_incomplete_read_schedules_reconnect(self):
+        conn = make_connection()
+        conn._connected = True
+        conn._auto_reconnect = True
+        conn._writer = make_writer()
+        conn._reader = AsyncMock()
+        conn._reader.readuntil = AsyncMock(side_effect=asyncio.IncompleteReadError(b"", 1))
+
+        with patch.object(conn, '_schedule_reconnect') as mock_reconnect:
+            await conn._reader_loop()
+
+        mock_reconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_connection_lost_resolves_pending_command(self):
+        conn = make_connection()
+        conn._connected = True
+        conn._writer = make_writer()
+        conn._arm_response(25)
+        future = conn._pending_response
+
+        conn._handle_connection_lost("test")
+
+        assert future.done() and future.result() == ""
+
+    @pytest.mark.asyncio
+    async def test_explicit_disconnect_stays_available_and_no_reconnect(self):
+        conn = make_connection()
+        conn._connected = True
+        conn._auto_reconnect = True
+        conn._writer = make_writer()
+
+        with patch.object(conn, '_schedule_reconnect') as mock_reconnect:
+            await conn.disconnect()
+
+        assert conn.available is True
+        assert conn._auto_reconnect is False
+        mock_reconnect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_ping_triggers_connection_lost(self):
+        conn = make_connection()
+        conn._connected = True
+
+        with patch("asyncio.sleep", AsyncMock()), \
+             patch.object(conn, '_send_ping', AsyncMock(return_value=False)), \
+             patch.object(conn, '_handle_connection_lost') as mock_lost:
+            await conn._ping_loop()
+
+        mock_lost.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_command_timeout_triggers_connection_lost(self):
+        conn = make_connection()
+        conn._connected = True
+        conn._writer = make_writer()
+
+        with patch.object(conn, '_reset_ping_timer'), \
+             patch.object(conn, '_await_response', AsyncMock(return_value="")), \
+             patch.object(conn, '_handle_connection_lost') as mock_lost:
+            result = await conn.send_command("?OUTPUT,25,1", expected_zone=25)
+
+        assert result == ""
+        mock_lost.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_connect_failure_closes_socket(self):
+        conn = make_connection()
+        reader = AsyncMock()
+        writer = make_writer()
+        reader.read = AsyncMock(side_effect=[b"login: ", b"password: ", b""])
+
+        with patch("asyncio.open_connection", return_value=(reader, writer)):
+            assert await conn.connect() is False
+
+        writer.close.assert_called_once()
+        assert conn._writer is None
+
+    @pytest.mark.asyncio
+    async def test_reconnect_loop_backs_off_until_success(self):
+        conn = make_connection()
+        conn._auto_reconnect = True
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        with patch("asyncio.sleep", side_effect=fake_sleep), \
+             patch.object(conn, 'connect', AsyncMock(side_effect=[False, False, True])) as mock_connect:
+            await conn._reconnect_loop()
+
+        assert mock_connect.call_count == 3
+        assert sleeps == [5, 10, 20]
+
+    @pytest.mark.asyncio
+    async def test_successful_connect_restores_availability(self):
+        conn = make_connection()
+        conn._lost = True
+        availability = []
+        conn.add_availability_callback(availability.append)
+        reader = AsyncMock()
+        reader.read = AsyncMock(side_effect=[b"login: ", b"password: ", b"GNET> "])
+
+        with patch("asyncio.open_connection", return_value=(reader, make_writer())), \
+             patch.object(conn, '_start_ping_timer'), \
+             patch.object(conn, '_start_reader_task'):
+            assert await conn.connect() is True
+
+        assert conn.available is True
+        assert availability == [True]
+
+
+# ---------------------------------------------------------------------------
+# Zone-matched replies
+# ---------------------------------------------------------------------------
+
+class TestZoneMatchedReplies:
+    @pytest.mark.asyncio
+    async def test_other_zone_push_does_not_answer_pending_query(self):
+        """A Pico press on zone 5 mid-query must not be taken as zone 28's reply."""
+        conn = make_connection()
+        conn._connected = True
+        conn._arm_response(28)
+        future = conn._pending_response
+        pushes = []
+        conn.add_push_callback(lambda line, source: pushes.append((line, source)))
+
+        conn._reader = AsyncMock()
+        conn._reader.readuntil = AsyncMock(side_effect=[
+            b"~OUTPUT,5,1,100.00\n",
+            b"~OUTPUT,28,1,40.00\n",
+            asyncio.CancelledError,
+        ])
+        await conn._reader_loop()
+
+        assert future.result() == "~OUTPUT,28,1,40.00"
+        assert pushes == [
+            ("~OUTPUT,5,1,100.00", "external"),
+            ("~OUTPUT,28,1,40.00", "internal"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_error_answers_pending_regardless_of_zone(self):
+        conn = make_connection()
+        conn._connected = True
+        conn._arm_response(28)
+        future = conn._pending_response
+
+        conn._reader = AsyncMock()
+        conn._reader.readuntil = AsyncMock(side_effect=[b"~ERROR,1\n", asyncio.CancelledError])
+        await conn._reader_loop()
+
+        assert future.result() == "~ERROR,1"
+
+    @pytest.mark.asyncio
+    async def test_reply_slot_armed_before_write(self):
+        """The reply future must exist before the command hits the wire."""
+        conn = make_connection()
+        conn._connected = True
+        conn._writer = make_writer()
+        armed_at_write = []
+        conn._writer.write = MagicMock(
+            side_effect=lambda data: armed_at_write.append(conn._pending_response is not None)
+        )
+
+        with patch.object(conn, '_reset_ping_timer'), \
+             patch.object(conn, '_await_response', AsyncMock(return_value="~OUTPUT,25,1,50.00")):
+            await conn.send_command("?OUTPUT,25,1", expected_zone=25)
+
+        assert armed_at_write == [True]
+        assert conn._pending_zone == 25

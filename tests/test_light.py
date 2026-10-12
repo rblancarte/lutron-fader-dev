@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lutron-fader')
 
 from custom_components.lutron_fader.light import LutronFaderLight
 from custom_components.lutron_fader.lutron_telnet import SOURCE_INTERNAL, SOURCE_EXTERNAL
+from homeassistant.exceptions import HomeAssistantError
 
 
 # ---------------------------------------------------------------------------
@@ -38,17 +39,15 @@ def make_light(zone_id=25, name="Test Light", original_entity_id=None):
 
 class TestBrightnessConversion:
     @pytest.mark.asyncio
-    async def test_turn_on_255_sends_99_pct(self):
-        """255 brightness hits the snap-to-full boundary: hub receives 99%."""
+    async def test_turn_on_255_sends_100_pct(self):
+        """255 brightness goes straight to 100% (no 99% + snap)."""
         light = make_light()
         light._connection.set_light_level = AsyncMock(return_value=True)
 
-        with patch("asyncio.get_event_loop") as mock_loop, \
-             patch("custom_components.lutron_fader.light.async_track_time_interval"):
-            mock_loop.return_value.call_later = MagicMock()
+        with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_on(brightness=255)
 
-        light._connection.set_light_level.assert_called_once_with(25, 99, 0)
+        light._connection.set_light_level.assert_called_once_with(25, 100, 0)
 
     @pytest.mark.asyncio
     async def test_turn_on_converts_128_to_50pct(self):
@@ -100,16 +99,14 @@ class TestBrightnessConversion:
 class TestTurnOnOff:
     @pytest.mark.asyncio
     async def test_turn_on_passes_transition(self):
-        """brightness=255 sends 99 to hub (snap boundary) with transition."""
+        """brightness=255 sends 100 to hub with the transition."""
         light = make_light()
         light._connection.set_light_level = AsyncMock(return_value=True)
 
-        with patch("asyncio.get_event_loop") as mock_loop, \
-             patch("custom_components.lutron_fader.light.async_track_time_interval"):
-            mock_loop.return_value.call_later = MagicMock()
+        with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_on(brightness=255, transition=1800)
 
-        light._connection.set_light_level.assert_called_once_with(25, 99, 1800)
+        light._connection.set_light_level.assert_called_once_with(25, 100, 1800)
 
     @pytest.mark.asyncio
     async def test_turn_on_defaults_transition_to_zero(self):
@@ -137,7 +134,8 @@ class TestTurnOnOff:
         light._attr_is_on = False
         light._connection.set_light_level = AsyncMock(return_value=False)
 
-        await light.async_turn_on(brightness=255)
+        with pytest.raises(HomeAssistantError):
+            await light.async_turn_on(brightness=255)
 
         assert light._attr_is_on is False
         light.async_write_ha_state.assert_not_called()
@@ -154,18 +152,16 @@ class TestTurnOnOff:
         light._connection.set_light_level.assert_called_once_with(25, 0, 0)
 
     @pytest.mark.asyncio
-    async def test_turn_off_with_fade_sends_level_1(self):
-        """Fade-to-off sends level 1 so the hub uses its dimmer curve."""
+    async def test_turn_off_with_fade_sends_zero(self):
+        """Fade-to-off sends a real 0 with the fade (no 1% + snap)."""
         light = make_light()
         light._attr_is_on = True
         light._connection.set_light_level = AsyncMock(return_value=True)
 
-        with patch("asyncio.get_event_loop") as mock_loop, \
-             patch("custom_components.lutron_fader.light.async_track_time_interval"):
-            mock_loop.return_value.call_later = MagicMock()
+        with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_off(transition=900)
 
-        light._connection.set_light_level.assert_called_once_with(25, 1, 900)
+        light._connection.set_light_level.assert_called_once_with(25, 0, 900)
 
     @pytest.mark.asyncio
     async def test_turn_off_instant_updates_state_on_success(self):
@@ -262,7 +258,7 @@ class TestFadeInterpolation:
 
         assert light.brightness == 200
 
-    def test_fade_tick_snaps_at_completion(self):
+    def test_fade_tick_completes_at_target(self):
         light = make_light()
         light._attr_is_on = True
         light._fade_start_level = 0.0
@@ -277,7 +273,7 @@ class TestFadeInterpolation:
         assert light._attr_is_on is True
         assert light._fade_cancel_unsub is None  # timer cancelled
 
-    def test_fade_tick_to_zero_snaps_off(self):
+    def test_fade_tick_to_zero_turns_off(self):
         light = make_light()
         light._attr_is_on = True
         light._fade_start_level = 128.0
@@ -305,106 +301,6 @@ class TestFadeInterpolation:
 
         assert 45 <= light._attr_brightness <= 55
         assert light._fade_cancel_unsub is unsub  # still running
-
-
-# ---------------------------------------------------------------------------
-# Boundary snapping
-# ---------------------------------------------------------------------------
-
-class TestBoundarySnapping:
-    @pytest.mark.asyncio
-    async def test_turn_on_100pct_schedules_snap_to_255(self):
-        """Full brightness (≥99%) schedules a call_later snap to 255."""
-        light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
-
-        with patch("custom_components.lutron_fader.light.asyncio.get_running_loop") as mock_loop, \
-             patch("custom_components.lutron_fader.light.async_track_time_interval"):
-            mock_call_later = MagicMock()
-            mock_loop.return_value.call_later = mock_call_later
-            await light.async_turn_on(brightness=255, transition=10)
-
-        # snap scheduled for 10 seconds later
-        mock_call_later.assert_called_once_with(10, light._snap_brightness, 255)
-
-    @pytest.mark.asyncio
-    async def test_turn_on_100pct_no_transition_no_snap_scheduled(self):
-        """Instant set to full brightness sets 255 directly, no call_later."""
-        light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
-
-        with patch("asyncio.get_event_loop") as mock_loop:
-            mock_call_later = MagicMock()
-            mock_loop.return_value.call_later = mock_call_later
-            await light.async_turn_on(brightness=255)
-
-        mock_call_later.assert_not_called()
-        assert light._attr_brightness == 255
-
-    @pytest.mark.asyncio
-    async def test_turn_off_with_fade_schedules_snap_off(self):
-        """Fade-to-off schedules call_later for snap-off."""
-        light = make_light()
-        light._attr_is_on = True
-        light._connection.set_light_level = AsyncMock(return_value=True)
-
-        with patch("custom_components.lutron_fader.light.asyncio.get_running_loop") as mock_loop, \
-             patch("custom_components.lutron_fader.light.async_track_time_interval"):
-            mock_call_later = MagicMock()
-            mock_loop.return_value.call_later = mock_call_later
-            await light.async_turn_off(transition=30)
-
-        mock_call_later.assert_called_once_with(30, light._snap_off)
-
-    def test_snap_brightness_sets_value_and_cancels_fade(self):
-        light = make_light()
-        light._fade_cancel_unsub = MagicMock()
-
-        light._snap_brightness(255)
-
-        assert light._attr_brightness == 255
-        assert light._attr_is_on is True
-        assert light._fade_cancel_unsub is None
-
-    def test_snap_brightness_sends_hub_command(self):
-        """_snap_brightness must tell the hub to match the snapped level."""
-        light = make_light()
-        light._fade_cancel_unsub = MagicMock()
-
-        light._snap_brightness(255)
-
-        light.hass.async_create_task.assert_called_once()
-
-    def test_snap_brightness_zero_sends_zero_to_hub(self):
-        light = make_light()
-        light._fade_cancel_unsub = MagicMock()
-
-        light._snap_brightness(0)
-
-        light.hass.async_create_task.assert_called_once()
-        assert light._attr_is_on is False
-
-    def test_snap_off_clears_state_and_cancels_fade(self):
-        light = make_light()
-        light._attr_is_on = True
-        light._attr_brightness = 100
-        light._fade_cancel_unsub = MagicMock()
-
-        light._snap_off()
-
-        assert light._attr_is_on is False
-        assert light._attr_brightness == 0
-        assert light._fade_cancel_unsub is None
-
-    def test_snap_off_sends_zero_to_hub(self):
-        """_snap_off must actually cut the hub to 0, not just update HA state."""
-        light = make_light()
-        light._attr_is_on = True
-        light._fade_cancel_unsub = MagicMock()
-
-        light._snap_off()
-
-        light.hass.async_create_task.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +388,8 @@ class TestFadeTargetClearedOnFailure:
         light = make_light()
         light._connection.set_light_level = AsyncMock(return_value=False)
 
-        await light.async_turn_on(brightness=128, transition=30)
+        with pytest.raises(HomeAssistantError):
+            await light.async_turn_on(brightness=128, transition=30)
 
         assert light._fade_target_lutron is None
 
@@ -502,7 +399,8 @@ class TestFadeTargetClearedOnFailure:
         light._attr_is_on = True
         light._connection.set_light_level = AsyncMock(return_value=False)
 
-        await light.async_turn_off(transition=30)
+        with pytest.raises(HomeAssistantError):
+            await light.async_turn_off(transition=30)
 
         assert light._fade_target_lutron is None
 
@@ -511,8 +409,7 @@ class TestFadeTargetClearedOnFailure:
         light = make_light()
         light._connection.set_light_level = AsyncMock(return_value=True)
 
-        with patch("asyncio.get_event_loop"), \
-             patch("custom_components.lutron_fader.light.async_track_time_interval"):
+        with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_on(brightness=128, transition=30)
 
         assert light._fade_target_lutron == 50  # 128/255*100 ≈ 50
@@ -591,3 +488,99 @@ class TestOriginalEntityMirroring:
         await light.async_update()
 
         light._connection.query_light_level.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# External override while awaiting the ack
+# ---------------------------------------------------------------------------
+
+class TestOverrideDuringAck:
+    @pytest.mark.asyncio
+    async def test_pico_press_during_ack_is_not_overridden(self):
+        light = make_light()
+        light._attr_is_on = False
+
+        async def set_level(zone_id, level, fade):
+            # Pico sets 80% while our fade command is in flight
+            light._handle_push("~OUTPUT,25,1,80.00", SOURCE_EXTERNAL)
+            return True
+
+        light._connection.set_light_level = AsyncMock(side_effect=set_level)
+
+        with patch("custom_components.lutron_fader.light.async_track_time_interval") as track:
+            await light.async_turn_on(brightness=128, transition=30)
+
+        track.assert_not_called()
+        assert light._attr_is_on is True
+        assert light._attr_brightness == int(0.8 * 255)
+
+
+# ---------------------------------------------------------------------------
+# Availability
+# ---------------------------------------------------------------------------
+
+class TestAvailability:
+    def test_available_follows_connection(self):
+        light = make_light()
+        light._connection.available = False
+        assert light.available is False
+        light._connection.available = True
+        assert light.available is True
+
+    def test_connection_lost_cancels_fade_and_writes_state(self):
+        light = make_light()
+        unsub = MagicMock()
+        light._fade_cancel_unsub = unsub
+
+        light._handle_availability(False)
+
+        unsub.assert_called_once()
+        light.async_write_ha_state.assert_called_once()
+
+    def test_connection_restored_requests_refresh(self):
+        light = make_light()
+        light.async_schedule_update_ha_state = MagicMock()
+
+        light._handle_availability(True)
+
+        light.async_schedule_update_ha_state.assert_called_once_with(True)
+
+
+# ---------------------------------------------------------------------------
+# Fades end on the hub's own setpoint (no follow-up snap command)
+# ---------------------------------------------------------------------------
+
+class TestNoSnap:
+    @pytest.mark.asyncio
+    async def test_fade_off_sends_single_command(self):
+        light = make_light()
+        light._attr_is_on = True
+        light._attr_brightness = 255
+        light._connection.set_light_level = AsyncMock(return_value=True)
+
+        with patch("custom_components.lutron_fader.light.async_track_time_interval", return_value=MagicMock()):
+            await light.async_turn_off(transition=30)
+
+        light._fade_start_time -= 31  # pretend the fade has finished
+        light._fade_tick(None)
+
+        light._connection.set_light_level.assert_called_once_with(25, 0, 30)
+        assert light._attr_is_on is False
+        assert light._attr_brightness == 0
+        assert light._fade_cancel_unsub is None
+        assert light._fade_target_lutron is None
+
+    @pytest.mark.asyncio
+    async def test_fade_to_full_sends_single_command(self):
+        light = make_light()
+        light._connection.set_light_level = AsyncMock(return_value=True)
+
+        with patch("custom_components.lutron_fader.light.async_track_time_interval", return_value=MagicMock()):
+            await light.async_turn_on(brightness=255, transition=30)
+
+        light._fade_start_time -= 31
+        light._fade_tick(None)
+
+        light._connection.set_light_level.assert_called_once_with(25, 100, 30)
+        assert light._attr_is_on is True
+        assert light._attr_brightness == 255

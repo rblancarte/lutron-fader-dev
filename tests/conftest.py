@@ -50,3 +50,9 @@ const_mod.CONF_PORT = "port"
 const_mod.CONF_USERNAME = "username"
 const_mod.CONF_PASSWORD = "password"
 const_mod.Platform = MagicMock()
+
+exceptions_mod = sys.modules["homeassistant.exceptions"]
+exceptions_mod.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+exceptions_mod.ServiceValidationError = type(
+    "ServiceValidationError", (exceptions_mod.HomeAssistantError,), {}
+)
