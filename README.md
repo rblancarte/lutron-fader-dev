@@ -20,6 +20,58 @@ Home Assistant
 
 When a fade command is issued, `LutronTelnetConnection` sends a command to the hub over Telnet and receives an acknowledgment. The hub reports the target level immediately rather than streaming intermediate values during the fade, so `LutronFaderLight` runs a client-side interpolation timer that pushes live brightness updates to HA every second for the duration of the fade.
 
+## State Machines
+
+Both the connection manager and the light entities are explicit state machines. Each keeps its state in a single `_state` field, and that field changes only in a `_transition()` method. Everything else (`available`, `is_on`, `brightness`, background tasks, timers) is derived from the state, not tracked in separate flags.
+
+### Connection manager (`lutron_telnet.py`)
+
+```
+DISCONNECTED ──connect()──▶ CONNECTING ──login ok──▶ CONNECTED
+                             │   ▲                       │
+                          fails  └── backoff, retry      │ lost
+                             └──────▶ (stays) ◀──────────┘
+any state ──disconnect()──▶ DISCONNECTED
+```
+
+- **One connection per hub, owned by the manager.** Only `connect()`, `disconnect()` and the retry loop open or close the socket; `send_command` never connects on its own. Failed attempts retry with backoff (5s, doubling, capped at 300s).
+- **The connection is only up in CONNECTED.** The socket, the reader task and the keep-alive task exist exactly while CONNECTED, and `available` / `is_connected` both mean `state == CONNECTED`.
+- **One command in flight at a time.** Hub replies carry no request ID, so commands queue on a lock and each fills a single reply slot.
+- **Typed errors:** `NotConnected`, `NoReply` and `HubError(code)`. On `NoReply` a command waits up to 15s for the reconnect and is resent once. `HubError` is never retried. Caseta sends error codes as `~ERROR,Enum=(2, 0x00000002)`.
+- **Keep-alive pings only after 60s with no traffic.** Any line from the hub, including Pico pushes, counts as traffic. The ping uses the same send path as commands.
+
+### Light entity (`light.py`)
+
+```
+                       link up + level read
+   ┌─────────────┐ ───────────────────────────▶ ┌──────────────────┐
+   │ UNAVAILABLE │                               │  STEADY(level)   │  off = level 0
+   └─────────────┘ ◀── link down (from any) ──── └──────────────────┘
+                                                   │     ▲      ▲
+                                    set(level,fade)│     │      │ push ≠ target
+                                                   ▼     │      │ (Pico / app / keypad)
+                                         ┌──────────────────┐   │
+                                         │ SENDING(target)  │───┤
+                                         └──────────────────┘   │
+                                  ack, fade=0 │      │ ack, fade>0
+                          ─▶ STEADY(target) ──┘      ▼          │
+                                         ┌──────────────────┐   │
+                                         │ FADING(start,    │───┘
+                                         │  target, t0, dur)│
+                                         └──────────────────┘
+                                           tick: show interpolated level
+                                           elapsed ≥ dur ─▶ STEADY(target)
+```
+
+- **Each zone is its own `LutronFaderLight`** with its own state and fade timer. All lights share one connection.
+- **Each state is a small frozen dataclass** (`Unavailable`, `Steady`, `Sending`, `Fading`) holding only its own data, so a target can't outlive its command or fade. Off is `Steady(0)`, and `turn_on` / `turn_off` share one `_set(level, fade)`.
+- **Pushes:** only `~OUTPUT,<zone>,1,<level>` counts as a level. During SENDING or FADING, a push within 2% of the target is treated as our own echo; any other level is an override (Pico, app, keypad) and wins.
+- **A late ack can't overwrite newer state.** Each ack is checked against its own `Sending` object, so a Pico press or newer command during the await isn't undone.
+- **Failures:** a `HubError` returns the light to its previous state (a fade keeps fading). A link failure makes it UNAVAILABLE. Either way the error is raised to the caller.
+- **Known limitation:** during a fade the hub reports the *target*, not the current level. A reconnect (or HA restart) mid-fade shows the target straight away while the lamp finishes fading.
+
+Both machines are covered by unit tests (`tests/`) and by live checks against a real hub (`scripts/hub_check.py`, `scripts/light_check.py`).
+
 ## The Lutron Integration Protocol
 
 The Lutron Integration Protocol is a line-based text protocol spoken over a Telnet connection to the hub (port 23). After logging in, you send commands and receive responses in real time.
@@ -131,10 +183,12 @@ python3 -m pytest tests/ -v
 
 ## Integration Scripts
 
-Scripts in `scripts/` require a real Lutron hub. Update the host IP in each script before running:
+Scripts in `scripts/` require a real Lutron hub. `hub_check.py` and `light_check.py` take `--host` and `--zone`; the other scripts hardcode the host IP, so update it before running them:
 
 | Script | Purpose |
 |--------|---------|
+| `hub_check.py` | Live check of the connection state machine: drops, reconnects, retries, hub errors (`--host`, `--zone`, `--wifi`) |
+| `light_check.py` | Live check of the light state machine: fades, overrides via a second session, link drops (Python 3.10+) |
 | `monitor_zones.py` | Watch live zone updates — useful for discovering zone IDs |
 | `debug_query.py` | Test query commands against the hub |
 | `test_lutron_telnet.py` | Full manual test suite with interactive mode |
