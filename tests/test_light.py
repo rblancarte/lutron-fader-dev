@@ -42,7 +42,7 @@ class TestBrightnessConversion:
     async def test_turn_on_255_sends_100_pct(self):
         """255 brightness goes straight to 100% (no 99% + snap)."""
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_on(brightness=255)
@@ -52,7 +52,7 @@ class TestBrightnessConversion:
     @pytest.mark.asyncio
     async def test_turn_on_converts_128_to_50pct(self):
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         await light.async_turn_on(brightness=128)
 
@@ -80,11 +80,11 @@ class TestBrightnessConversion:
         assert light._attr_is_on is False
 
     @pytest.mark.asyncio
-    async def test_update_none_response_leaves_state_unchanged(self):
+    async def test_update_failure_leaves_state_unchanged(self):
         light = make_light()
         light._attr_is_on = True
         light._attr_brightness = 128
-        light._connection.query_light_level = AsyncMock(return_value=None)
+        light._connection.query_light_level = AsyncMock(side_effect=HomeAssistantError("no reply"))
 
         await light.async_update()
 
@@ -101,7 +101,7 @@ class TestTurnOnOff:
     async def test_turn_on_passes_transition(self):
         """brightness=255 sends 100 to hub with the transition."""
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_on(brightness=255, transition=1800)
@@ -111,7 +111,7 @@ class TestTurnOnOff:
     @pytest.mark.asyncio
     async def test_turn_on_defaults_transition_to_zero(self):
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         await light.async_turn_on(brightness=128)
 
@@ -121,7 +121,7 @@ class TestTurnOnOff:
     @pytest.mark.asyncio
     async def test_turn_on_updates_state_on_success(self):
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         await light.async_turn_on(brightness=128)
 
@@ -132,7 +132,7 @@ class TestTurnOnOff:
     async def test_turn_on_does_not_update_state_on_failure(self):
         light = make_light()
         light._attr_is_on = False
-        light._connection.set_light_level = AsyncMock(return_value=False)
+        light._connection.set_light_level = AsyncMock(side_effect=HomeAssistantError("no reply"))
 
         with pytest.raises(HomeAssistantError):
             await light.async_turn_on(brightness=255)
@@ -145,7 +145,7 @@ class TestTurnOnOff:
         """Instant turn-off (no transition) sends level 0."""
         light = make_light()
         light._attr_is_on = True
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         await light.async_turn_off()
 
@@ -156,7 +156,7 @@ class TestTurnOnOff:
         """Fade-to-off sends a real 0 with the fade (no 1% + snap)."""
         light = make_light()
         light._attr_is_on = True
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_off(transition=900)
@@ -167,7 +167,7 @@ class TestTurnOnOff:
     async def test_turn_off_instant_updates_state_on_success(self):
         light = make_light()
         light._attr_is_on = True
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         await light.async_turn_off()
 
@@ -386,7 +386,7 @@ class TestFadeTargetClearedOnFailure:
     @pytest.mark.asyncio
     async def test_turn_on_failure_clears_fade_target(self):
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=False)
+        light._connection.set_light_level = AsyncMock(side_effect=HomeAssistantError("no reply"))
 
         with pytest.raises(HomeAssistantError):
             await light.async_turn_on(brightness=128, transition=30)
@@ -397,7 +397,7 @@ class TestFadeTargetClearedOnFailure:
     async def test_turn_off_failure_clears_fade_target(self):
         light = make_light()
         light._attr_is_on = True
-        light._connection.set_light_level = AsyncMock(return_value=False)
+        light._connection.set_light_level = AsyncMock(side_effect=HomeAssistantError("no reply"))
 
         with pytest.raises(HomeAssistantError):
             await light.async_turn_off(transition=30)
@@ -407,7 +407,7 @@ class TestFadeTargetClearedOnFailure:
     @pytest.mark.asyncio
     async def test_turn_on_success_sets_fade_target(self):
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         with patch("custom_components.lutron_fader.light.async_track_time_interval"):
             await light.async_turn_on(brightness=128, transition=30)
@@ -556,7 +556,7 @@ class TestNoSnap:
         light = make_light()
         light._attr_is_on = True
         light._attr_brightness = 255
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         with patch("custom_components.lutron_fader.light.async_track_time_interval", return_value=MagicMock()):
             await light.async_turn_off(transition=30)
@@ -573,7 +573,7 @@ class TestNoSnap:
     @pytest.mark.asyncio
     async def test_fade_to_full_sends_single_command(self):
         light = make_light()
-        light._connection.set_light_level = AsyncMock(return_value=True)
+        light._connection.set_light_level = AsyncMock(return_value=None)
 
         with patch("custom_components.lutron_fader.light.async_track_time_interval", return_value=MagicMock()):
             await light.async_turn_on(brightness=255, transition=30)

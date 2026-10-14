@@ -115,7 +115,7 @@ class TestFadeToRouting:
     async def test_unmapped_zone_falls_back_to_connection(self):
         registry = FakeRegistry({})
         connection = AsyncMock()
-        connection.set_light_level = AsyncMock(return_value=True)
+        connection.set_light_level = AsyncMock(return_value=None)
         hass = make_hass([make_entry()], connection)
         handler = await register_and_get_fade_to(hass, registry)
 
