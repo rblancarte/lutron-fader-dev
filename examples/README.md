@@ -1,6 +1,8 @@
 # Lutron Fader Examples
 
-This folder contains example dashboard configurations and usage examples for the Lutron Fader integration.
+This folder contains example dashboard configurations for the Lutron Fader card.
+
+The cards point at your **official** Lutron lights (from the Lutron Caseta integration). Lutron Fader's `sensor.<light>_fade` sensors track the fades those cards start.
 
 ## Dashboard Examples
 
@@ -22,7 +24,7 @@ Contains various dashboard layouts for the Lutron Fader custom card:
 
 ### auto-lutron-dashboard.yaml
 
-Contains examples for automatically displaying all Lutron Fader entities:
+Contains examples for automatically displaying a card for every Lutron light:
 
 - Manual grid layout
 - Auto-entities configuration (requires auto-entities from HACS)
@@ -80,10 +82,10 @@ views:
 
 ## Automation Examples
 
-See the main [README.md](../README.md#example-automations) for automation examples using the Lutron Fader services.
+Fades are started with the standard `light.turn_on` / `light.turn_off` and a `transition`. See the [integration README](../lutron-fader/README.md#examples) for automations that react to a fade sensor (for example "when the fade finishes").
 
 ## Need Help?
 
-- Check the main [README.md](../README.md) for installation and setup
-- See [custom_components/lutron_fader/www/README.md](../custom_components/lutron_fader/www/README.md) for card-specific documentation
+- Check the [integration README](../lutron-fader/README.md) for installation and setup
+- See the [card README](../lutron-fader-card/README.md) for card-specific documentation
 - Visit the [GitHub Issues](https://github.com/rblancarte/lutron-fader/issues) page for support

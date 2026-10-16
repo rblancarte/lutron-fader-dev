@@ -1,58 +1,16 @@
-"""Stub out Home Assistant modules so tests run without a full HA install."""
+"""Test setup: a real Home Assistant (pytest-homeassistant-custom-component)."""
+import os
 import sys
-import enum
-from unittest.mock import MagicMock
 
-# Every HA submodule that any integration file imports must be listed here
-_STUBS = [
-    "homeassistant",
-    "homeassistant.components",
-    "homeassistant.components.http",
-    "homeassistant.components.light",
-    "homeassistant.config_entries",
-    "homeassistant.const",
-    "homeassistant.core",
-    "homeassistant.data_entry_flow",
-    "homeassistant.exceptions",
-    "homeassistant.helpers",
-    "homeassistant.helpers.config_validation",
-    "homeassistant.helpers.discovery",
-    "homeassistant.helpers.entity_platform",
-    "homeassistant.helpers.entity_registry",
-    "homeassistant.helpers.event",
-    "homeassistant.helpers.typing",
-]
+import pytest
 
-for mod in _STUBS:
-    sys.modules.setdefault(mod, MagicMock())
+# Make the integration importable as custom_components.lutron_fader
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lutron-fader"))
 
-# Patch specific constants / classes the integration references by name
+pytest_plugins = "pytest_homeassistant_custom_component"
 
-class ColorMode(str, enum.Enum):
-    BRIGHTNESS = "brightness"
 
-light_mod = sys.modules["homeassistant.components.light"]
-light_mod.ATTR_BRIGHTNESS = "brightness"
-light_mod.ATTR_TRANSITION = "transition"
-light_mod.ColorMode = ColorMode
-light_mod.LightEntityFeature = MagicMock(TRANSITION=32)
-light_mod.LightEntity = object
-light_mod.PLATFORM_SCHEMA = MagicMock()
-light_mod.PLATFORM_SCHEMA.extend = MagicMock(return_value=MagicMock())
-
-core_mod = sys.modules["homeassistant.core"]
-core_mod.callback = lambda fn: fn  # identity decorator — HA uses it as a marker only
-
-const_mod = sys.modules["homeassistant.const"]
-const_mod.CONF_NAME = "name"
-const_mod.CONF_HOST = "host"
-const_mod.CONF_PORT = "port"
-const_mod.CONF_USERNAME = "username"
-const_mod.CONF_PASSWORD = "password"
-const_mod.Platform = MagicMock()
-
-exceptions_mod = sys.modules["homeassistant.exceptions"]
-exceptions_mod.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
-exceptions_mod.ServiceValidationError = type(
-    "ServiceValidationError", (exceptions_mod.HomeAssistantError,), {}
-)
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(enable_custom_integrations):
+    """Let HA load integrations from custom_components/."""
+    yield

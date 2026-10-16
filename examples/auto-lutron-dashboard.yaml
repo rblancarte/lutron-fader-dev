@@ -1,5 +1,7 @@
 # Auto-Lutron Fader Dashboard
-# This will automatically show all Lutron Fader entities with the custom card
+# Shows a Lutron Fader card for each of your Lutron lights.
+# Cards point at the official Lutron lights (lutron_caseta); Lutron Fader's
+# sensor.<light>_fade sensors track the fades those cards start.
 
 # Option 1: Manual grid (works without additional plugins)
 type: grid
@@ -28,7 +30,8 @@ card:
   columns: 2
 filter:
   include:
-    - integration: lutron_fader
+    - integration: lutron_caseta   # the official Lutron lights, not lutron_fader's sensors
+      domain: light
       options:
         type: custom:lutron-fader-card
   exclude: []

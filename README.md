@@ -1,152 +1,65 @@
 # Lutron Fader Dev
 
-Development workspace for the Lutron Fader project — a Home Assistant custom integration that unlocks hardware-native fade capabilities on Lutron systems via the **Lutron Integration Protocol (LIP)**.
+Development workspace for the Lutron Fader project: a Home Assistant custom integration that shows the **progress of native Lutron fades**, plus its companion Lovelace card.
 
 ## What This Project Does
 
-Home Assistant's built-in Lutron Caseta integration is limited to what the official cloud API exposes. The Lutron Integration Protocol — accessible over a direct Telnet connection to the hub — provides far richer control: extended fade times, zone queries, real-time push events, and more features that the cloud API never surfaces.
+Lutron dimmers fade in hardware, and Home Assistant's official Lutron Caseta integration can already start those fades: `light.turn_on` with a `transition` sends a native fade over Lutron's local LEAP API, with no cap on its length. But the hub only ever reports a fade's **target**. Home Assistant shows a light at its end brightness the moment a fade starts, with no way to see where it is or when it ends.
 
-This project is a starting point for building a full-featured HA integration on top of the Lutron Integration Protocol. The first capability implemented is long fade times (minutes to hours), which is not possible through the standard integration. The architecture is designed to grow — each additional protocol feature can be added without restructuring the core connection layer.
+Lutron Fader fills that gap. It never talks to the hub. It watches Home Assistant for fades sent to Lutron lights, calculates each fade's progress, and publishes it as a `sensor.<light>_fade` per light. The card and your automations keep using the official lights.
+
+> **History:** versions up to 1.x drove the lights themselves over a Telnet connection to a Smart Bridge Pro. Once it turned out LEAP already exposes native fades, 2.0 became a tracker. The Telnet code is in git history (`lutron-fader` commit `3e9540e`).
 
 ## How It Works
 
 ```
-Home Assistant
-    └── LutronFaderLight (light.py)
-            └── LutronTelnetConnection (lutron_telnet.py)
-                    └── Telnet → Lutron Hub (port 23)
-                            └── Lutron Integration Protocol
+ card / automation / script ──light.turn_on{transition}──▶ lutron_caseta ──LEAP──▶ hub
+            │ call_service event                │ state_changed (light jumps to target)
+            ▼                                   ▼
+   FadeRouter (__init__.py) ──routes──▶ FadeSensor (sensor.py, one per light)
+     resolves entity / area /                └── FadeTracker (tracker.py)
+     device / floor targets                        Idle / Pending / Fading
+                                                   │
+                                                   ▼
+                       sensor.living_room_floor_lamp_fade   state: idle | fading
+                         attrs: light_entity_id, brightness, brightness_pct, start_pct,
+                                target_pct, started_at, ends_at, progress
 ```
 
-When a fade command is issued, `LutronTelnetConnection` sends a command to the hub over Telnet and receives an acknowledgment. The hub reports the target level immediately rather than streaming intermediate values during the fade, so `LutronFaderLight` runs a client-side interpolation timer that pushes live brightness updates to HA every second for the duration of the fade.
+- **`FadeRouter`** finds every dimmable, fade-capable light from `lutron_caseta`, `lutron_caseta_pro` or `lutron` in the entity registry. It reloads when such lights are added, removed, renamed, or gain the needed capabilities.
+- **It listens to `call_service` events** for `light.turn_on` / `light.turn_off` that carry a `transition`. HA fires that event *before* the light acts, so the light's current state is the fade's start. Targets given by area, device, floor or label are resolved to lights.
+- **Each `FadeSensor`** watches its light's `state_changed` events and runs a 1-second refresh only while a fade is pending or running. It sits on the light's device and saves the running fade so it survives a restart. Its per-second attributes are kept out of the recorder.
 
-## State Machines
-
-Both the connection manager and the light entities are explicit state machines. Each keeps its state in a single `_state` field, and that field changes only in a `_transition()` method. Everything else (`available`, `is_on`, `brightness`, background tasks, timers) is derived from the state, not tracked in separate flags.
-
-### Connection manager (`lutron_telnet.py`)
+## The Fade State Machine (`tracker.py`)
 
 ```
-DISCONNECTED ──connect()──▶ CONNECTING ──login ok──▶ CONNECTED
-                             │   ▲                       │
-                          fails  └── backoff, retry      │ lost
-                             └──────▶ (stays) ◀──────────┘
-any state ──disconnect()──▶ DISCONNECTED
+    Idle ──call with transition──▶ Pending(start, started_at, duration)
+     ▲                               │ light reports a new level → that's the target
+     │ already at target, or         ▼
+     │ no report within 5s       Fading(start, target, started_at, ends_at)
+     │◀──────────────────────────── │ tick: publish the calculated level
+     │◀── now ≥ ends_at ────────────┤
+     │◀── light changes to ≠ target, off, or unavailable (override)
+         new call while Fading ──▶ Pending(start = current calculated level)
 ```
 
-- **One connection per hub, owned by the manager.** Only `connect()`, `disconnect()` and the retry loop open or close the socket; `send_command` never connects on its own. Failed attempts retry with backoff (5s, doubling, capped at 300s).
-- **The connection is only up in CONNECTED.** The socket, the reader task and the keep-alive task exist exactly while CONNECTED, and `available` / `is_connected` both mean `state == CONNECTED`.
-- **One command in flight at a time.** Hub replies carry no request ID, so commands queue on a lock and each fills a single reply slot.
-- **Typed errors:** `NotConnected`, `NoReply` and `HubError(code)`. On `NoReply` a command waits up to 15s for the reconnect and is resent once. `HubError` is never retried. Caseta sends error codes as `~ERROR,Enum=(2, 0x00000002)`.
-- **Keep-alive pings only after 60s with no traffic.** Any line from the hub, including Pico pushes, counts as traffic. The ping uses the same send path as commands.
+- **One `_state` field per tracker,** holding one of three frozen dataclasses (`Idle`, `Pending`, `Fading`). It changes only in `_transition()`, and everything shown is derived from it.
+- **The target comes from the light, not the call.** Whatever the light reports right after the command is the target. That handles `brightness`, `brightness_pct`, a bare `turn_on` and `turn_off` without parsing them.
+- **A new fade mid-fade starts from our calculated level,** because HA is showing the old target by then.
+- **Times are wall-clock UTC,** so `restore()` can resume a fade after a restart, if it hasn't ended and the light still reports its target.
+- **Echo tolerance:** ±3 on the 0–255 scale.
+- **No HA imports,** so it's unit-tested on its own.
 
-### Light entity (`light.py`)
-
-```
-                       link up + level read
-   ┌─────────────┐ ───────────────────────────▶ ┌──────────────────┐
-   │ UNAVAILABLE │                               │  STEADY(level)   │  off = level 0
-   └─────────────┘ ◀── link down (from any) ──── └──────────────────┘
-                                                   │     ▲      ▲
-                                    set(level,fade)│     │      │ push ≠ target
-                                                   ▼     │      │ (Pico / app / keypad)
-                                         ┌──────────────────┐   │
-                                         │ SENDING(target)  │───┤
-                                         └──────────────────┘   │
-                                  ack, fade=0 │      │ ack, fade>0
-                          ─▶ STEADY(target) ──┘      ▼          │
-                                         ┌──────────────────┐   │
-                                         │ FADING(start,    │───┘
-                                         │  target, t0, dur)│
-                                         └──────────────────┘
-                                           tick: show interpolated level
-                                           elapsed ≥ dur ─▶ STEADY(target)
-```
-
-- **Each zone is its own `LutronFaderLight`** with its own state and fade timer. All lights share one connection.
-- **Each state is a small frozen dataclass** (`Unavailable`, `Steady`, `Sending`, `Fading`) holding only its own data, so a target can't outlive its command or fade. Off is `Steady(0)`, and `turn_on` / `turn_off` share one `_set(level, fade)`.
-- **Pushes:** only `~OUTPUT,<zone>,1,<level>` counts as a level. During SENDING or FADING, a push within 2% of the target is treated as our own echo; any other level is an override (Pico, app, keypad) and wins.
-- **A late ack can't overwrite newer state.** Each ack is checked against its own `Sending` object, so a Pico press or newer command during the await isn't undone.
-- **Failures:** a `HubError` returns the light to its previous state (a fade keeps fading). A link failure makes it UNAVAILABLE. Either way the error is raised to the caller.
-- **Known limitation:** during a fade the hub reports the *target*, not the current level. A reconnect (or HA restart) mid-fade shows the target straight away while the lamp finishes fading.
-
-Both machines are covered by unit tests (`tests/`) and by live checks against a real hub (`scripts/hub_check.py`, `scripts/light_check.py`).
-
-## The Lutron Integration Protocol
-
-The Lutron Integration Protocol is a line-based text protocol spoken over a Telnet connection to the hub (port 23). After logging in, you send commands and receive responses in real time.
-
-**Login sequence:**
-```
-login: lutron
-password: integration
-GNET>
-```
-
-**Command format:**
-```
-#OUTPUT,<zone_id>,<action>,<level>,<fade_time>
-```
-
-**Query format:**
-```
-?OUTPUT,<zone_id>,<action>
-```
-
-**Push response format:**
-```
-~OUTPUT,<zone_id>,<action>,<level>
-```
-
-Where `action 1` = zone level, `level` is 0–100 (percentage).
-
-**Key gotcha — fade time format:**  
-Raw integer fade times only work for values 0–59 (treated as seconds). For 60 seconds or longer, the hub silently ignores a raw integer and snaps immediately. Fade times must be formatted as `HH:MM:SS`:
-
-```
-# Works — snaps instantly despite the value:
-#OUTPUT,5,1,50,60
-
-# Works correctly — fades over 1 minute:
-#OUTPUT,5,1,50,00:01:00
-```
-
-**Sample session** (via `nc <hub_ip> 23`):
-```
-login: lutron
-password: integration
-GNET> ?OUTPUT,5,1
-~OUTPUT,5,1,41.18
-GNET> #OUTPUT,5,1,0,00:30:00
-~OUTPUT,5,1,0.00
-GNET>
-```
-
-The hub acknowledges a fade command immediately with the target level. The physical light then fades over the specified time.
-
-**Caseta Pro supported OUTPUT actions:**  
-The ICD documents many OUTPUT action numbers, but Caseta Pro (L-BDGPRO2-WH) only appears to support four — confirmed through testing:
-
-| Action | Command | Description |
-|--------|---------|-------------|
-| 1 | `#OUTPUT,<id>,1,<level>,<fade>` | Set level (with optional fade time) |
-| 2 | `#OUTPUT,<id>,2` | Start Raising |
-| 3 | `#OUTPUT,<id>,3` | Start Lowering |
-| 4 | `#OUTPUT,<id>,4` | Stop |
-
-Action 1 is the one this integration uses, for now. The fade time argument is what makes it useful — see the `HH:MM:SS` format note above.
-
-**Protocol specification:**  
-The full Lutron Integration Protocol specification (P/N 040249) is publicly hosted by Lutron: [Lutron Integration Protocol PDF](https://assets.lutron.com/a/documents/040249.pdf). If you want a local copy for reference, dropping it in this directory is safe — `*.pdf` is gitignored.
+**Limits:** fades started outside HA (the Lutron app, a Pico, hub scenes) only ever show up as their target, so they aren't tracked. Progress is calculated as an even fade; no Lutron API reports the in-between level.
 
 ## Repo Structure
 
 ```
 lutron-fader-dev/
-├── lutron-fader/        # Submodule — HA integration (custom_components)
-├── lutron-fader-card/   # Submodule — Lovelace card
-├── tests/               # Unit tests (no hub required)
-├── scripts/             # Integration/diagnostic scripts (real hub required)
+├── lutron-fader/        # Submodule: HA integration (custom_components)
+├── lutron-fader-card/   # Submodule: Lovelace card
+├── tests/               # Unit + Home Assistant integration tests (no hub required)
+├── scripts/             # Diagnostic scripts (real hub required)
 └── examples/            # Dashboard configuration examples
 ```
 
@@ -174,26 +87,38 @@ git submodule update --init --recursive
 
 ## Running Tests
 
-Tests are unit tests and require no Lutron hub:
+No Lutron hub is needed. The integration tests run inside a real Home Assistant using `pytest-homeassistant-custom-component`, which installs Home Assistant itself. Use Python 3.14 (what Home Assistant 2026.10 runs on):
 
 ```bash
-pip install pytest pytest-asyncio
-python3 -m pytest tests/ -v
+python3.14 -m venv .venv
+.venv/bin/pip install pytest-homeassistant-custom-component
+.venv/bin/python -m pytest          # settings come from pytest.ini
 ```
 
-## Integration Scripts
+- `tests/test_tracker.py`: the state machine on its own
+- `tests/test_integration.py`: end to end with fake Lutron lights:
+  - setup and which lights are tracked
+  - fades and fading off
+  - area targets
+  - overrides
+  - restarts
+  - migration from 1.x
+  - new lights
+  - the sensor entity ID
 
-Scripts in `scripts/` require a real Lutron hub. `hub_check.py` and `light_check.py` take `--host` and `--zone`; the other scripts hardcode the host IP, so update it before running them:
+## Diagnostic Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `hub_check.py` | Live check of the connection state machine: drops, reconnects, retries, hub errors (`--host`, `--zone`, `--wifi`) |
-| `light_check.py` | Live check of the light state machine: fades, overrides via a second session, link drops (Python 3.10+) |
-| `monitor_zones.py` | Watch live zone updates — useful for discovering zone IDs |
-| `debug_query.py` | Test query commands against the hub |
-| `test_lutron_telnet.py` | Full manual test suite with interactive mode |
-| `test_connection_longevity.py` | Test how long the hub keeps a connection alive |
-| `test_lip_queries.py` | Test various Lutron Integration Protocol commands |
+| `monitor_zones.py` | Watch a Smart Bridge Pro's Telnet push stream: zone levels and Pico presses (hardcodes the hub IP; edit before running) |
+
+### Background: the Lutron Integration Protocol (Telnet)
+`monitor_zones.py` talks the Lutron Integration Protocol: a line-based text protocol over Telnet (port 23) on Smart Bridge Pro, RadioRA 2 and HomeWorks systems. Log in with `lutron` / `integration`. Then:
+- **Set a level:** `#OUTPUT,<zone>,1,<level>,<HH:MM:SS fade>`
+- **Query a level:** `?OUTPUT,<zone>,1`
+- **Push:** the hub sends `~OUTPUT,<zone>,1,<level>` when a level changes, and `~DEVICE,<id>,<button>,<3=press|4=release>` for Pico buttons.
+
+Like LEAP, it reports only a fade's target. Fade times of 60s or more must use `HH:MM:SS`. The full specification is Lutron P/N 040249: [Lutron Integration Protocol PDF](https://assets.lutron.com/a/documents/040249.pdf). `*.pdf` is gitignored, so a local copy is safe here.
 
 ## Submodule Workflow
 
