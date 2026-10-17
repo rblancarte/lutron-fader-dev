@@ -259,6 +259,37 @@ async def test_pico_override_ends_the_fade(hass, lamps, freezer):
     assert hass.states.get(LAMP_FADE).state == "idle"
 
 
+@pytest.mark.parametrize("start,target,outside", [
+    (None, 255, 255),   # fade 0->100, Pico "on" (100%)
+    (255, None, None),  # fade 100->0, Pico "off"
+    (None, 128, 128),   # fade 0->50, the Pico's 50% button
+    (None, 252, 255),   # fade 0->99, Pico "on": 1% away is a real change, not an echo
+])
+async def test_outside_change_to_the_target_ends_the_fade(hass, lamps, freezer, start, target, outside):
+    """Found in real HA: HA already shows the target, so this is only a re-report."""
+    set_light(hass, LAMP, start)
+    await setup_tracker(hass)
+    await fade(hass, target, 100, entity_id=LAMP)
+    await advance(hass, freezer, 10)
+    assert hass.states.get(LAMP_FADE).state == "fading"
+
+    set_light(hass, LAMP, outside)  # same state and attributes: a state_reported, not a change
+    await hass.async_block_till_done()
+
+    assert hass.states.get(LAMP_FADE).state == "idle"
+
+
+async def test_re_report_right_after_the_fade_starts_is_ignored(hass, lamps, freezer):
+    await setup_tracker(hass)
+    await fade(hass, 255, 100, entity_id=LAMP)
+    await advance(hass, freezer, 1)
+
+    set_light(hass, LAMP, 255)  # the hub repeating the command
+    await hass.async_block_till_done()
+
+    assert hass.states.get(LAMP_FADE).state == "fading"
+
+
 async def test_instant_command_mid_fade_ends_it(hass, lamps, freezer):
     await setup_tracker(hass)
     await fade(hass, 255, 100, entity_id=LAMP)

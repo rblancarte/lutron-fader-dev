@@ -63,7 +63,7 @@ class TestStart:
     def test_already_at_target_does_not_fade(self):
         t = FadeTracker()
         t.on_call(128.0, 30, "ctx", T0)
-        t.on_light_state(129.0, at(0.1))  # within tolerance of the start
+        t.on_light_state(129.0, at(0.1))  # rounding noise, within tolerance of the start
         assert t.state == Idle()
 
     def test_pending_times_out_without_a_report(self):
@@ -116,12 +116,18 @@ class TestFading:
 
     def test_target_echo_is_ignored(self):
         t = fading_tracker(target=255.0)
-        assert t.on_light_state(254.0, at(10)) is False
+        assert t.on_light_state(254.0, at(10)) is False  # rounding noise
         assert isinstance(t.state, Fading)
 
     def test_override_ends_the_fade(self):
         t = fading_tracker(target=255.0)
         assert t.on_light_state(76.0, at(10)) is True  # Pico set 30%
+        assert t.state == Idle()
+
+    def test_one_percent_away_is_an_override(self):
+        """Found in real HA: fade to 99% (252), Pico "on" (100% = 255) was taken as an echo."""
+        t = fading_tracker(target=252.0)
+        assert t.on_light_state(255.0, at(10)) is True
         assert t.state == Idle()
 
     def test_turned_off_mid_fade_ends_it(self):
@@ -144,6 +150,39 @@ class TestFading:
         t = fading_tracker()
         t.on_call(255.0, 0, "ctx2", at(10))
         assert t.state == Idle()
+
+
+# ---------------------------------------------------------------------------
+# Outside changes that land exactly on the target (only seen as re-reports)
+# ---------------------------------------------------------------------------
+
+class TestReports:
+    def test_report_of_target_after_grace_ends_the_fade(self):
+        t = fading_tracker(target=255.0, duration=100)  # Pico "on" during a fade up
+        assert t.on_light_report(255.0, at(10)) is True
+        assert t.state == Idle()
+
+    def test_report_of_target_during_grace_is_ignored(self):
+        t = fading_tracker(target=255.0, duration=100)  # the hub repeating our command
+        assert t.on_light_report(255.0, at(2)) is False
+        assert isinstance(t.state, Fading)
+
+    def test_report_of_off_ends_a_fade_down(self):
+        t = fading_tracker(start=255.0, target=0.0, duration=100)  # Pico "off"
+        t.on_light_report(0.0, at(30))
+        assert t.state == Idle()
+
+    def test_report_when_not_fading_is_ignored(self):
+        t = FadeTracker()
+        assert t.on_light_report(255.0, at(30)) is False
+        t.on_call(0.0, 30, "ctx", T0)  # pending: still waits for the change
+        assert t.on_light_report(0.0, at(1)) is False
+        assert isinstance(t.state, Pending)
+
+    def test_report_of_unavailable_is_ignored(self):
+        t = fading_tracker()
+        assert t.on_light_report(None, at(30)) is False
+        assert isinstance(t.state, Fading)
 
 
 # ---------------------------------------------------------------------------

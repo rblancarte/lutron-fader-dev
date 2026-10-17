@@ -2,7 +2,7 @@
 
 This folder contains example dashboard configurations for the Lutron Fader card.
 
-The cards point at your **official** Lutron lights (from the Lutron Caseta integration). Lutron Fader's `sensor.<light>_fade` sensors track the fades those cards start.
+The cards point at your **official** Lutron lights (from the Lutron Caseta integration). Lutron Fader's `sensor.<light>_fade` sensors track the fades those cards start, and each card reads its light's sensor to show a progress bar and countdown while a fade runs.
 
 ## Dashboard Examples
 
